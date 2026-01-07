@@ -48,7 +48,7 @@ class ImportedWaypoint {
 class GpxService {
   
   // --- IMPORT ---
-  Future<GpxImportData> importFiles() async {
+Future<GpxImportData> importFiles() async {
     FilePickerResult? result = await FilePicker.platform.pickFiles(
       allowMultiple: true,
       type: FileType.custom,
@@ -63,11 +63,12 @@ class GpxService {
       for (var file in result.files) {
         String xmlString = "";
 
+        // Get Filename without extension (e.g. "MyRoute.gpx" -> "MyRoute")
+        String fallbackName = file.name.replaceAll(RegExp(r'\.gpx$', caseSensitive: false), '');
+
         try {
           if (kIsWeb) {
-            if (file.bytes != null) {
-              xmlString = utf8.decode(file.bytes!);
-            }
+            if (file.bytes != null) xmlString = utf8.decode(file.bytes!);
           } else {
             if (file.path != null) {
               final ioFile = File(file.path!);
@@ -88,9 +89,15 @@ class GpxService {
                   .toList();
               if (segmentPoints.isNotEmpty) trackSegments.add(segmentPoints);
             }
+
             if (trackSegments.isNotEmpty) {
+              // LOGIC FIX: Use filename if internal name is empty or null
+              String finalName = (trk.name != null && trk.name!.isNotEmpty) 
+                  ? trk.name! 
+                  : fallbackName;
+
               parsedTracks.add(ImportedTrack(
-                name: trk.name ?? "Untitled Track",
+                name: finalName,
                 segments: trackSegments,
               ));
             }
@@ -98,12 +105,13 @@ class GpxService {
 
           // B. Parse Waypoints
           for (var wpt in gpx.wpts) {
-            if (wpt.lat != null && wpt.lon != null) {
+             // ... (Keep existing waypoint logic) ...
+             if (wpt.lat != null && wpt.lon != null) {
               String? linkUrl;
               if (wpt.links.isNotEmpty) linkUrl = wpt.links.first.href;
 
               parsedWaypoints.add(ImportedWaypoint(
-                name: wpt.name ?? "Waypoint",
+                name: wpt.name ?? fallbackName, // Use filename as fallback for Waypoints too
                 point: LatLng(wpt.lat!, wpt.lon!),
                 description: wpt.desc,
                 comment: wpt.cmt,
@@ -120,7 +128,7 @@ class GpxService {
 
     return GpxImportData(tracks: parsedTracks, waypoints: parsedWaypoints);
   }
-
+  
   // --- EXPORT ---
   Future<void> exportGpx(String fileName, List<TrackData> tracks, List<WaypointData> waypoints) async {
     final gpx = Gpx();

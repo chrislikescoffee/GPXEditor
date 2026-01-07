@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:flutter_map_cancellable_tile_provider/flutter_map_cancellable_tile_provider.dart';
 
 // Widgets
 import '../widgets/tool_palette.dart';
@@ -40,7 +41,8 @@ class _EditorScreenState extends State<EditorScreen> {
 
   // State
   EditorMode _currentMode = EditorMode.view;
-  bool? _extendFromEnd; 
+  bool? _extendFromEnd;
+  bool _isDarkMode = false; // New State for Theme
   
   // UI State
   bool _isLoading = false;
@@ -75,6 +77,48 @@ class _EditorScreenState extends State<EditorScreen> {
     _statusTimer = Timer(const Duration(milliseconds: 2500), () {
       if (mounted) setState(() => _statusMessage = null);
     });
+  }
+
+  // --- MAP CONTROLS ---
+
+  void _zoomIn() {
+    final currentZoom = _mapController.camera.zoom;
+    _mapController.move(_mapController.camera.center, currentZoom + 1);
+  }
+
+  void _zoomOut() {
+    final currentZoom = _mapController.camera.zoom;
+    _mapController.move(_mapController.camera.center, currentZoom - 1);
+  }
+
+  void _fitToContent() {
+    if (tracks.isEmpty && waypoints.isEmpty) return;
+
+    // 1. Collect all points
+    List<LatLng> allPoints = [];
+    for (var t in tracks) {
+      if (t.isVisible) {
+        for (var seg in t.segments) {
+          allPoints.addAll(seg);
+        }
+      }
+    }
+    for (var w in waypoints) {
+      if (w.isVisible) allPoints.add(w.point);
+    }
+
+    if (allPoints.isEmpty) return;
+
+    // 2. Calculate Bounds
+    final bounds = LatLngBounds.fromPoints(allPoints);
+
+    // 3. Fit Camera (with padding)
+    _mapController.fitCamera(
+      CameraFit.bounds(
+        bounds: bounds,
+        padding: const EdgeInsets.all(50),
+      ),
+    );
   }
 
   // --- FILE ACTIONS ---
@@ -119,7 +163,7 @@ class _EditorScreenState extends State<EditorScreen> {
         }
       });
 
-      // Zoom to fit
+      // Zoom logic
       if (tracks.isNotEmpty && tracks.last.segments.isNotEmpty && tracks.last.segments.first.isNotEmpty) {
         _mapController.move(tracks.last.segments.first.first, 16.0);
       } else if (waypoints.isNotEmpty) {
@@ -393,7 +437,6 @@ class _EditorScreenState extends State<EditorScreen> {
       builder: (ctx) {
         bool isEditing = false;
         
-        // Controllers for editing
         final nameCtrl = TextEditingController(text: wpt.name);
         final descCtrl = TextEditingController(text: wpt.description ?? "");
         final cmtCtrl = TextEditingController(text: wpt.comment ?? "");
@@ -420,7 +463,6 @@ class _EditorScreenState extends State<EditorScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: isEditing
                       ? [
-                          // EDIT MODE FIELDS
                           TextField(controller: nameCtrl, decoration: const InputDecoration(labelText: "Name")),
                           TextField(controller: descCtrl, decoration: const InputDecoration(labelText: "Description")),
                           TextField(controller: cmtCtrl, decoration: const InputDecoration(labelText: "Comment")),
@@ -428,7 +470,6 @@ class _EditorScreenState extends State<EditorScreen> {
                           TextField(controller: linkCtrl, decoration: const InputDecoration(labelText: "Link URL")),
                         ]
                       : [
-                          // VIEW MODE FIELDS
                           _infoRow("Description", wpt.description),
                           _infoRow("Comment", wpt.comment),
                           _infoRow("Symbol", wpt.symbol),
@@ -629,7 +670,7 @@ class _EditorScreenState extends State<EditorScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // 1. Prepare Layers (FLATTEN SEGMENTS FOR POLYLINE)
+    // 1. Prepare Layers
     final borderPolylines = <Polyline>[];
     final trackPolylines = <Polyline>[];
 
@@ -642,7 +683,8 @@ class _EditorScreenState extends State<EditorScreen> {
         if (isSel) {
           borderPolylines.add(Polyline(
             points: seg, strokeWidth: 8.0, 
-            color: Colors.white, borderColor: Colors.black, borderStrokeWidth: 1.0, 
+            color: _isDarkMode ? Colors.white : Colors.black, // Invert border for contrast
+            borderColor: _isDarkMode ? Colors.black : Colors.white, borderStrokeWidth: 1.0, 
           ));
         }
         trackPolylines.add(Polyline(
@@ -651,7 +693,7 @@ class _EditorScreenState extends State<EditorScreen> {
       }
     }
 
-    // 2. Markers 
+    // 2. Markers (Waypoints & Endpoints)
     List<Marker> markers = [];
     
     // -- WAYPOINTS --
@@ -667,8 +709,21 @@ class _EditorScreenState extends State<EditorScreen> {
             children: [
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-                decoration: BoxDecoration(color: Colors.white.withOpacity(0.8), borderRadius: BorderRadius.circular(4)),
-                child: Text(wpt.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold)),
+                decoration: BoxDecoration(
+                  color: _isDarkMode ? Colors.black87 : Colors.white.withOpacity(0.9), 
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(color: _isDarkMode ? Colors.white54 : Colors.grey),
+                ),
+                child: Text(
+                  wpt.name, 
+                  maxLines: 1, 
+                  overflow: TextOverflow.ellipsis, 
+                  style: TextStyle(
+                    fontSize: 10, 
+                    fontWeight: FontWeight.bold,
+                    color: _isDarkMode ? Colors.white : Colors.black
+                  )
+                ),
               ),
               const Icon(Icons.location_on, color: Colors.red, size: 30),
             ],
@@ -798,8 +853,15 @@ class _EditorScreenState extends State<EditorScreen> {
                   ),
                   children: [
                     TileLayer(
-                      urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                      userAgentPackageName: 'com.example.gpx_editor',
+                      // 1. PERFORMANCE FIX: Added CancellableNetworkTileProvider
+                      tileProvider: CancellableNetworkTileProvider(),
+                      
+                      // 2. DARK MODE URL SWITCH
+                      urlTemplate: _isDarkMode
+                          ? 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}'
+                          : 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png',
+                      subdomains: const ['a', 'b', 'c', 'd'],
+                      userAgentPackageName: 'com.timeinloo.gpx_editor',
                     ),
                     PolylineLayer(polylines: borderPolylines),
                     PolylineLayer(polylines: trackPolylines),
@@ -807,39 +869,106 @@ class _EditorScreenState extends State<EditorScreen> {
                   ],
                 ),
                 
+                // --- TOOL PALETTE (Wrapped in Theme for Dark Mode) ---
                 Positioned(
                   top: 20, left: 20,
-                  child: ToolPalette(
-                    onCut: _handleCut,
-                    onMove: _handleMove,
-                    onExtend: _handleExtend,
-                    onReverse: _handleReverse,
-                    onDeletePoint: _handleDeletePoint,
-                    onSimplify: _handleSimplify,
-                    onCreateWaypoint: _handleCreateWaypoint,
-                    
-                    isCutEnabled: _selectedTrackIds.length == 1,
-                    isExtendEnabled: _selectedTrackIds.length == 1,
-                    isMoveEnabled: _selectedTrackIds.length == 1,
-                    isDeletePointEnabled: _selectedTrackIds.length == 1,
-                    isSimplifyEnabled: _selectedTrackIds.length == 1,
-                    isCreateWaypointEnabled: _selectedTrackIds.length == 1,
-                    isReverseEnabled: _selectedTrackIds.isNotEmpty,
-                    
-                    activeMode: _currentMode,
+                  child: Theme(
+                    data: _isDarkMode ? ThemeData.dark() : ThemeData.light(),
+                    child: ToolPalette(
+                      onCut: _handleCut,
+                      onMove: _handleMove,
+                      onExtend: _handleExtend,
+                      onReverse: _handleReverse,
+                      onDeletePoint: _handleDeletePoint,
+                      onSimplify: _handleSimplify,
+                      onCreateWaypoint: _handleCreateWaypoint,
+                      
+                      isCutEnabled: _selectedTrackIds.length == 1,
+                      isExtendEnabled: _selectedTrackIds.length == 1,
+                      isMoveEnabled: _selectedTrackIds.length == 1,
+                      isDeletePointEnabled: _selectedTrackIds.length == 1,
+                      isSimplifyEnabled: _selectedTrackIds.length == 1,
+                      isCreateWaypointEnabled: _selectedTrackIds.length == 1,
+                      isReverseEnabled: _selectedTrackIds.isNotEmpty,
+                      
+                      activeMode: _currentMode,
+                    ),
                   ),
                 ),
                 
                  if (_currentMode != EditorMode.view)
                    Positioned(
-                     bottom: 20, right: 20,
-                     child: FloatingActionButton.extended(
-                       onPressed: () => setState(() => _currentMode = EditorMode.view),
-                       label: const Text("Done"),
-                       icon: const Icon(Icons.check),
-                       backgroundColor: Colors.green,
+                     bottom: 20, right: 100, 
+                     child: Theme(
+                       data: _isDarkMode ? ThemeData.dark() : ThemeData.light(),
+                       child: FloatingActionButton.extended(
+                         onPressed: () => setState(() => _currentMode = EditorMode.view),
+                         label: const Text("Done"),
+                         icon: const Icon(Icons.check),
+                         // We adjust the color slightly for dark mode visibility
+                         backgroundColor: _isDarkMode ? Colors.green[800] : Colors.green,
+                         foregroundColor: Colors.white,
+                       ),
                      ),
                    ),
+
+                // --- CONTROLS (Zoom, Pan, Dark Mode) ---
+                Positioned(
+                  bottom: 20,
+                  right: 20, 
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // Zoom & Fit Group
+                      Card(
+                        elevation: 4,
+                        // Manual Color override to match Theme
+                        color: _isDarkMode ? const Color(0xFF424242) : Colors.white,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                        child: Column(
+                          children: [
+                            IconButton(
+                              icon: const Icon(Icons.add), 
+                              tooltip: "Zoom In",
+                              color: _isDarkMode ? Colors.white : Colors.black,
+                              onPressed: _zoomIn,
+                            ),
+                            Container(height: 1, width: 30, color: Colors.grey[300]),
+                            IconButton(
+                              icon: const Icon(Icons.remove), 
+                              tooltip: "Zoom Out",
+                              color: _isDarkMode ? Colors.white : Colors.black,
+                              onPressed: _zoomOut,
+                            ),
+                            Container(height: 1, width: 30, color: Colors.grey[300]),
+                            IconButton(
+                              icon: const Icon(Icons.fit_screen), 
+                              tooltip: "Fit Content to Screen",
+                              color: _isDarkMode ? Colors.white : Colors.black,
+                              onPressed: _fitToContent,
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      // Dark Mode Toggle
+                      FloatingActionButton(
+                        mini: true,
+                        backgroundColor: _isDarkMode ? const Color(0xFF424242) : Colors.white,
+                        onPressed: () {
+                          setState(() {
+                            _isDarkMode = !_isDarkMode;
+                          });
+                        },
+                        tooltip: _isDarkMode ? "Switch to Light Mode" : "Switch to Dark Mode",
+                        child: Icon(
+                          _isDarkMode ? Icons.light_mode : Icons.dark_mode,
+                          color: _isDarkMode ? Colors.white : Colors.grey[800],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
 
                 if (_statusMessage != null)
                   Positioned(
@@ -868,22 +997,48 @@ class _EditorScreenState extends State<EditorScreen> {
             ),
           ),
 
+          // --- PATH LIST (Updated for Dark Mode) ---
           SizedBox(
             width: 250, 
-            child: PathList(
-              tracks: tracks,
-              selectedTrackIds: _selectedTrackIds,
-              onSelect: _handleSelect,
-              onSelectAll: _handleSelectAll,
-              onReorder: _handleReorder,
-              onToggleVisibility: _handleToggleVis,
-              onColorChanged: _handleColorChange,
-              onRename: _handleRename,
-              onImport: _handleImport,
-              onSave: _handleSave,
-              onDelete: _handleDeleteSelected,
-              onJoin: _handleJoin,
-              onCreateNew: _handleCreateNew,
+            child: Container(
+              // 1. Sidebar Background: Very Dark (Material Dark Surface) or White
+              color: _isDarkMode ? const Color(0xFF121212) : Colors.white, 
+              child: Theme(
+                // 2. FORCE EXPLICIT THEME DATA
+                data: _isDarkMode 
+                    ? ThemeData.dark().copyWith(
+                        scaffoldBackgroundColor: const Color(0xFF121212),
+                        cardColor: const Color(0xFF2C2C2C), // Lighter grey for cards so they stand out
+                        dividerColor: Colors.grey[800],
+                        // Ensure text is pure white
+                        textTheme: ThemeData.dark().textTheme.apply(
+                          bodyColor: Colors.white,
+                          displayColor: Colors.white,
+                        ),
+                        // Ensure icons are white
+                        iconTheme: const IconThemeData(color: Colors.white),
+                        listTileTheme: const ListTileThemeData(
+                          textColor: Colors.white,
+                          iconColor: Colors.white,
+                        ),
+                      ) 
+                    : ThemeData.light(),
+                child: PathList(
+                  tracks: tracks,
+                  selectedTrackIds: _selectedTrackIds,
+                  onSelect: _handleSelect,
+                  onSelectAll: _handleSelectAll,
+                  onReorder: _handleReorder,
+                  onToggleVisibility: _handleToggleVis,
+                  onColorChanged: _handleColorChange,
+                  onRename: _handleRename,
+                  onImport: _handleImport,
+                  onSave: _handleSave,
+                  onDelete: _handleDeleteSelected,
+                  onJoin: _handleJoin,
+                  onCreateNew: _handleCreateNew,
+                ),
+              ),
             ),
           ),
         ],

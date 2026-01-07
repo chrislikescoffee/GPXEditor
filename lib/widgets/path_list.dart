@@ -1,31 +1,28 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart'; 
+import 'package:flutter/services.dart'; // NEW: Required for detecting Ctrl/Cmd keys
 import '../models/track_data.dart';
 
 class PathList extends StatefulWidget {
   final List<TrackData> tracks;
   final Set<String> selectedTrackIds;
-  
-  final Function(String id, bool isMultiSelect) onSelect;
-  final VoidCallback onSelectAll; 
-  final Function(int oldIndex, int newIndex) onReorder;
-  final Function(String id) onToggleVisibility;
-  final Function(String id, Color newColor) onColorChanged;
-  final Function(String id, String newName) onRename;
-  
-  // Actions
+  final Function(String, bool) onSelect;
+  final VoidCallback onSelectAll;
+  final Function(int, int) onReorder;
+  final Function(String) onToggleVisibility;
+  final Function(String, Color) onColorChanged;
+  final Function(String, String) onRename;
   final VoidCallback onImport;
   final VoidCallback onSave;
-  final VoidCallback onDelete; 
-  final VoidCallback onJoin; 
-  final VoidCallback onCreateNew; 
+  final VoidCallback onDelete;
+  final VoidCallback onJoin;
+  final VoidCallback onCreateNew;
 
   const PathList({
     super.key,
     required this.tracks,
     required this.selectedTrackIds,
     required this.onSelect,
-    required this.onSelectAll, 
+    required this.onSelectAll,
     required this.onReorder,
     required this.onToggleVisibility,
     required this.onColorChanged,
@@ -34,7 +31,7 @@ class PathList extends StatefulWidget {
     required this.onSave,
     required this.onDelete,
     required this.onJoin,
-    required this.onCreateNew, 
+    required this.onCreateNew,
   });
 
   @override
@@ -42,32 +39,40 @@ class PathList extends StatefulWidget {
 }
 
 class _PathListState extends State<PathList> {
-  // Helper: Color Picker
-  void _showColorPicker(BuildContext context, TrackData track) {
+  
+  void _showColorPicker(BuildContext context, String trackId, Color currentColor) {
+    final colors = [
+      Colors.blue, Colors.orange, Colors.purple, Colors.green,
+      Colors.teal, Colors.red, Colors.pink, Colors.indigo,
+      Colors.amber, Colors.brown, Colors.cyan, Colors.lime,
+      Colors.black, Colors.grey,
+    ];
+
     showDialog(
       context: context,
       builder: (ctx) {
         return AlertDialog(
-          title: const Text("Select Color"),
+          title: const Text("Pick Color"),
           content: Wrap(
-            spacing: 10, runSpacing: 10,
-            children: [
-              Colors.blue, Colors.red, Colors.green, Colors.orange, 
-              Colors.purple, Colors.black, Colors.teal, Colors.amber,
-              Colors.indigo, Colors.brown, Colors.pink, Colors.grey
-            ].map((color) {
+            spacing: 8,
+            runSpacing: 8,
+            children: colors.map((c) {
               return GestureDetector(
                 onTap: () {
-                  widget.onColorChanged(track.id, color);
+                  widget.onColorChanged(trackId, c);
                   Navigator.of(ctx).pop();
                 },
                 child: Container(
-                  width: 40, height: 40,
+                  width: 32,
+                  height: 32,
                   decoration: BoxDecoration(
-                    color: color,
+                    color: c,
                     shape: BoxShape.circle,
-                    border: Border.all(color: Colors.grey),
+                    border: Border.all(color: Colors.grey, width: 1),
                   ),
+                  child: c == currentColor
+                      ? const Icon(Icons.check, size: 16, color: Colors.white)
+                      : null,
                 ),
               );
             }).toList(),
@@ -77,9 +82,8 @@ class _PathListState extends State<PathList> {
     );
   }
 
-  // Helper: Rename Dialog
-  void _showRenameDialog(BuildContext context, TrackData track) {
-    TextEditingController controller = TextEditingController(text: track.name);
+  void _showRenameDialog(BuildContext context, String trackId, String currentName) {
+    TextEditingController controller = TextEditingController(text: currentName);
     showDialog(
       context: context,
       builder: (ctx) {
@@ -88,19 +92,15 @@ class _PathListState extends State<PathList> {
           content: TextField(
             controller: controller,
             autofocus: true,
-            onSubmitted: (value) {
-              widget.onRename(track.id, value);
-              Navigator.of(ctx).pop();
-            },
           ),
           actions: [
             TextButton(
               onPressed: () => Navigator.of(ctx).pop(),
               child: const Text("Cancel"),
             ),
-            TextButton(
+            ElevatedButton(
               onPressed: () {
-                widget.onRename(track.id, controller.text);
+                widget.onRename(trackId, controller.text);
                 Navigator.of(ctx).pop();
               },
               child: const Text("Save"),
@@ -113,172 +113,262 @@ class _PathListState extends State<PathList> {
 
   @override
   Widget build(BuildContext context) {
-    bool showJoin = widget.selectedTrackIds.length > 1;
-    bool areAllSelected = widget.tracks.isNotEmpty && 
-                          widget.selectedTrackIds.length == widget.tracks.length;
+    final isDarkMode = Theme.of(context).brightness == Brightness.dark;
+    
+    final headerStyle = TextStyle(
+      fontWeight: FontWeight.bold, 
+      fontSize: 16,
+      color: isDarkMode ? Colors.white : Colors.black87
+    );
 
-    return Card(
-      elevation: 4,
-      margin: EdgeInsets.zero,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
-      child: Container(
-        width: 250,
-        color: Colors.white,
-        child: Column(
-          children: [
-            // HEADER
-            Container(
-              padding: const EdgeInsets.all(12),
-              color: Colors.grey[200],
-              width: double.infinity,
-              child: const Text(
-                "Path List",
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-              ),
+    return Column(
+      children: [
+        // --- HEADER ---
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            border: Border(
+              bottom: BorderSide(
+                color: isDarkMode ? Colors.grey[800]! : Colors.grey[300]!
+              )
             ),
-            
-            // SELECT ALL OPTION (Only if multiple paths exist)
-            if (widget.tracks.length > 1)
-              InkWell(
-                onTap: widget.onSelectAll,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  decoration: BoxDecoration(
-                    border: Border(bottom: BorderSide(color: Colors.grey[300]!)),
-                  ),
-                  child: Row(
-                    children: [
-                      Icon(
-                        areAllSelected ? Icons.check_box : Icons.check_box_outline_blank,
-                        size: 20,
-                        color: Colors.grey[600],
-                      ),
-                      const SizedBox(width: 12),
-                      Text(
-                        areAllSelected ? "Deselect All" : "Select All",
-                        style: TextStyle(color: Colors.grey[800], fontSize: 13),
-                      ),
-                    ],
-                  ),
+            color: isDarkMode ? Colors.black12 : Colors.grey[50],
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text("Paths", style: headerStyle),
+              TextButton(
+                onPressed: widget.onSelectAll,
+                child: Text(
+                  widget.selectedTrackIds.length == widget.tracks.length && widget.tracks.isNotEmpty
+                      ? "Deselect All"
+                      : "Select All",
+                  style: const TextStyle(fontSize: 12),
                 ),
               ),
+            ],
+          ),
+        ),
 
-            // LIST
-            Expanded(
-              child: ReorderableListView.builder(
-                onReorder: widget.onReorder,
-                buildDefaultDragHandles: false,
-                itemCount: widget.tracks.length,
-                itemBuilder: (context, index) {
-                  final track = widget.tracks[index];
-                  final isSelected = widget.selectedTrackIds.contains(track.id);
+        // --- LIST ---
+        Expanded(
+          child: widget.tracks.isEmpty
+              ? Center(
+                  child: Text(
+                    "No tracks yet.\nImport a GPX file\nor create new.",
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.grey[500]),
+                  ),
+                )
+              : ReorderableListView.builder(
+                  onReorder: widget.onReorder,
+                  itemCount: widget.tracks.length,
+                  itemBuilder: (context, index) {
+                    final track = widget.tracks[index];
+                    final isSelected = widget.selectedTrackIds.contains(track.id);
 
-                  return ReorderableDragStartListener(
-                    key: ValueKey(track.id),
-                    index: index,
-                    child: Material(
-                      color: isSelected ? Colors.blue.withOpacity(0.1) : Colors.transparent,
+                    Color itemBgColor;
+                    if (isSelected) {
+                      itemBgColor = isDarkMode 
+                          ? Colors.teal.withOpacity(0.3) 
+                          : Colors.blue.withOpacity(0.1);
+                    } else {
+                      itemBgColor = Theme.of(context).cardColor;
+                    }
+
+                    return Container(
+                      key: ValueKey(track.id),
+                      decoration: BoxDecoration(
+                        color: itemBgColor,
+                        border: Border(
+                          bottom: BorderSide(
+                            color: isDarkMode ? Colors.grey[800]! : Colors.grey[200]!
+                          )
+                        ),
+                      ),
                       child: ListTile(
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 12),
-                        leading: GestureDetector(
-                          onTap: () => _showColorPicker(context, track),
-                          child: Container(width: 24, height: 24, decoration: BoxDecoration(color: track.color, shape: BoxShape.circle, border: Border.all(color: Colors.grey, width: 1))),
+                        dense: true,
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
+                        
+                        leading: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              icon: Icon(
+                                track.isVisible ? Icons.visibility : Icons.visibility_off,
+                                color: track.isVisible 
+                                    ? (isDarkMode ? Colors.grey[400] : Colors.grey[600]) 
+                                    : Colors.grey[300],
+                                size: 20,
+                              ),
+                              onPressed: () => widget.onToggleVisibility(track.id),
+                              tooltip: "Toggle Visibility",
+                            ),
+                            GestureDetector(
+                              onTap: () => _showColorPicker(context, track.id, track.color),
+                              child: Container(
+                                width: 16, height: 16,
+                                decoration: BoxDecoration(
+                                  color: track.color,
+                                  shape: BoxShape.circle,
+                                  border: Border.all(
+                                    color: isDarkMode ? Colors.white54 : Colors.grey, 
+                                    width: 1
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
+
                         title: GestureDetector(
-                          onDoubleTap: () => _showRenameDialog(context, track),
-                          child: Text(track.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(decoration: null, color: track.isVisible ? Colors.black : Colors.grey, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal)),
+                          onDoubleTap: () => _showRenameDialog(context, track.id, track.name),
+                          child: Text(
+                            track.name,
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
                         ),
-                        trailing: IconButton(
-                          icon: Icon(track.isVisible ? Icons.visibility : Icons.visibility_off, color: track.isVisible ? Colors.black : Colors.grey, size: 20),
-                          onPressed: () => widget.onToggleVisibility(track.id),
+
+                        trailing: ReorderableDragStartListener(
+                          index: index,
+                          child: Icon(
+                            Icons.drag_handle, 
+                            color: isDarkMode ? Colors.grey[600] : Colors.grey[400]
+                          ),
                         ),
+
+                        // FIX: Detect Keyboard Modifiers for Multi-Select
                         onTap: () {
-                          bool isMulti = HardwareKeyboard.instance.isControlPressed || HardwareKeyboard.instance.isMetaPressed;
-                          if (!isMulti && isSelected && widget.selectedTrackIds.length > 1) {
-                            isMulti = true; 
-                          }
+                          bool isMulti = HardwareKeyboard.instance.isControlPressed || 
+                                         HardwareKeyboard.instance.isMetaPressed || 
+                                         HardwareKeyboard.instance.isShiftPressed;
                           widget.onSelect(track.id, isMulti);
                         },
                       ),
-                    ),
-                  );
-                },
-              ),
+                    );
+                  },
+                ),
+        ),
+
+        // --- BOTTOM ACTIONS ---
+        Container(
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: isDarkMode ? Colors.black12 : Colors.grey[100],
+            border: Border(
+              top: BorderSide(
+                color: isDarkMode ? Colors.grey[800]! : Colors.grey[300]!
+              )
             ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // 1. Join Paths (Conditionally Visible)
+              if (widget.selectedTrackIds.length > 1) ...[
+                SizedBox(
+                  height: 36,
+                  child: ElevatedButton.icon(
+                    onPressed: widget.onJoin,
+                    icon: const Icon(Icons.merge_type, size: 18),
+                    label: const Text("Join Selected Paths"),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: isDarkMode ? Colors.grey[800] : Colors.white,
+                      foregroundColor: isDarkMode ? Colors.white : Colors.black87,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+              ],
 
-            const Divider(height: 1),
-
-            // 1. JOIN BUTTON (Top of the bottom section)
-            if (showJoin)
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.only(left: 8, right: 8, top: 4, bottom: 4),
+              // 2. Create New (Full Width)
+              SizedBox(
+                height: 36,
                 child: ElevatedButton.icon(
-                  onPressed: widget.onJoin,
-                  icon: const Icon(Icons.merge_type, size: 18),
-                  label: Text("JOIN ${widget.selectedTrackIds.length} PATHS"),
+                  onPressed: widget.onCreateNew,
+                  icon: const Icon(Icons.add, size: 18),
+                  label: const Text("Create New Path"),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.blue,
-                    foregroundColor: Colors.white,
-                    elevation: 0,
+                    backgroundColor: isDarkMode ? Colors.grey[800] : Colors.white,
+                    foregroundColor: isDarkMode ? Colors.white : Colors.black87,
                   ),
                 ),
               ),
+              const SizedBox(height: 8),
 
-            // 2. CREATE NEW PATH BUTTON (Middle of the bottom section)
-            InkWell(
-              onTap: widget.onCreateNew,
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-                decoration: BoxDecoration(
-                   // Separator line at the top to distinguish from list/join button
-                   border: Border(top: BorderSide(color: Colors.grey[300]!)),
-                   // Subtle blue tint to indicate creation
-                   color: Colors.blue.withOpacity(0.05),
-                ),
-                child: const Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(Icons.add_circle, color: Colors.blue, size: 20),
-                    SizedBox(width: 8),
-                    Text(
-                      "Create New Path",
-                      style: TextStyle(color: Colors.blue, fontWeight: FontWeight.bold),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-
-            // 3. FOOTER TOOLS (Bottom)
-            Container(
-              padding: const EdgeInsets.all(8.0),
-              decoration: BoxDecoration(
-                color: Colors.grey[50],
-                border: Border(top: BorderSide(color: Colors.grey[300]!)),
-              ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              // 3. File Operations Row
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  _footerBtn(Icons.upload_file, "Import", widget.onImport),
-                  _footerBtn(Icons.save, "Export", widget.onSave),
-                  _footerBtn(Icons.delete, "Delete Selected", widget.onDelete),
+                  Expanded(child: _ActionButton(
+                    icon: Icons.upload_file, 
+                    label: "Import", 
+                    onTap: widget.onImport,
+                    isDark: isDarkMode,
+                  )),
+                  Expanded(child: _ActionButton(
+                    icon: Icons.save_alt, 
+                    label: "Export", 
+                    onTap: widget.onSave, 
+                    color: Colors.blue,
+                    isDark: isDarkMode,
+                  )),
+                  Expanded(child: _ActionButton(
+                    icon: Icons.delete, 
+                    label: "Delete", 
+                    onTap: widget.onDelete, 
+                    color: Colors.red,
+                    isDark: isDarkMode,
+                  )),
                 ],
               ),
-            ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// Helper Widget
+class _ActionButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  final Color? color;
+  final bool isDark;
+
+  const _ActionButton({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    this.color,
+    required this.isDark,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final iconColor = color ?? (isDark ? Colors.white70 : Colors.black87);
+    
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(4),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Column(
+          children: [
+            Icon(icon, size: 24, color: iconColor),
+            const SizedBox(height: 2),
+            Text(label, style: TextStyle(fontSize: 11, color: iconColor)),
           ],
         ),
       ),
-    );
-  }
-
-  Widget _footerBtn(IconData icon, String label, VoidCallback onTap) {
-    return IconButton(
-      icon: Icon(icon),
-      tooltip: label,
-      onPressed: onTap,
-      padding: EdgeInsets.zero,
-      constraints: const BoxConstraints(),
     );
   }
 }

@@ -2,23 +2,22 @@ import 'package:flutter/material.dart';
 import '../enums/editor_mode.dart';
 
 class ToolPalette extends StatelessWidget {
-  // Callbacks
   final VoidCallback onCut;
   final VoidCallback onMove;
   final VoidCallback onExtend;
   final VoidCallback onReverse;
   final VoidCallback onDeletePoint;
   final VoidCallback onSimplify;
-  final VoidCallback onCreateWaypoint; // NEW
+  final VoidCallback onCreateWaypoint;
 
-  // Flags
   final bool isCutEnabled;
   final bool isExtendEnabled;
-  final bool isReverseEnabled;
   final bool isMoveEnabled;
   final bool isDeletePointEnabled;
   final bool isSimplifyEnabled;
-  final bool isCreateWaypointEnabled; // NEW
+  final bool isCreateWaypointEnabled;
+  final bool isReverseEnabled;
+
   final EditorMode activeMode;
 
   const ToolPalette({
@@ -29,65 +28,166 @@ class ToolPalette extends StatelessWidget {
     required this.onReverse,
     required this.onDeletePoint,
     required this.onSimplify,
-    required this.onCreateWaypoint, // NEW
-    
-    this.isCutEnabled = true,
-    this.isExtendEnabled = true,
-    this.isReverseEnabled = true,
-    this.isMoveEnabled = true,
-    this.isDeletePointEnabled = true,
-    this.isSimplifyEnabled = true,
-    this.isCreateWaypointEnabled = true, // NEW
+    required this.onCreateWaypoint,
+    required this.isCutEnabled,
+    required this.isExtendEnabled,
+    required this.isMoveEnabled,
+    required this.isDeletePointEnabled,
+    required this.isSimplifyEnabled,
+    required this.isCreateWaypointEnabled,
+    required this.isReverseEnabled,
     required this.activeMode,
   });
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    
+    // Background color for the palette card
+    final bgColor = isDark ? const Color(0xFF1E1E1E) : Colors.white;
+    final iconColor = isDark ? Colors.white : Colors.black87;
+
     return Card(
       elevation: 4,
-      child: Container(
-        width: 200, 
-        padding: const EdgeInsets.all(12.0),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Wrap(
-              spacing: 10, runSpacing: 10, 
-              children: [
-                _buildToolBtn(Icons.content_cut, isCutEnabled ? "Cut Track" : "Select exactly one track", onCut, enabled: isCutEnabled, isActive: activeMode == EditorMode.cut),
-                _buildToolBtn(Icons.open_with, isMoveEnabled ? "Move Points" : "Select exactly one track", onMove, enabled: isMoveEnabled, isActive: activeMode == EditorMode.edit),
-                _buildToolBtn(Icons.remove_circle_outline, isDeletePointEnabled ? "Delete Points" : "Select exactly one track", onDeletePoint, enabled: isDeletePointEnabled, isActive: activeMode == EditorMode.deletePoint),
-                _buildToolBtn(Icons.edit_road, isExtendEnabled ? "Extend Line" : "Select exactly one track", onExtend, enabled: isExtendEnabled, isActive: activeMode == EditorMode.extend),
-                _buildToolBtn(Icons.swap_calls, isReverseEnabled ? "Reverse" : "Select track(s)", onReverse, enabled: isReverseEnabled, isActive: activeMode == EditorMode.reverse),
-                _buildToolBtn(Icons.auto_fix_high, isSimplifyEnabled ? "Simplify" : "Select exactly one track", onSimplify, enabled: isSimplifyEnabled, isActive: false),
-
-                // NEW: Create Waypoint Button
-                _buildToolBtn(
-                  Icons.add_location_alt, 
-                  isCreateWaypointEnabled ? "Add Waypoint" : "Select a track to add waypoint", 
-                  onCreateWaypoint,
-                  enabled: isCreateWaypointEnabled,
-                  isActive: activeMode == EditorMode.createWaypoint,
-                ),
-              ],
-            ),
-          ],
+      color: bgColor,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(8.0),
+        child: SizedBox(
+          // CONSTRAINT: Width for roughly 2 icons (48px each + padding)
+          width: 104, 
+          child: Wrap(
+            alignment: WrapAlignment.center,
+            spacing: 4, // Horizontal space between buttons
+            runSpacing: 4, // Vertical space between rows
+            children: [
+              _ToolButton(
+                icon: Icons.content_cut,
+                tooltip: "Cut Track",
+                isEnabled: isCutEnabled,
+                isActive: activeMode == EditorMode.cut,
+                onTap: onCut,
+                baseColor: iconColor,
+              ),
+              _ToolButton(
+                icon: Icons.merge_type, 
+                // Using merge icon for Join/Extend context, or 'add_road'
+                // But specifically for 'Extend' logic:
+                tooltip: "Extend Track",
+                isEnabled: isExtendEnabled,
+                isActive: activeMode == EditorMode.extend,
+                onTap: onExtend,
+                baseColor: iconColor,
+                iconData: Icons.add_road, 
+              ),
+              _ToolButton(
+                icon: Icons.open_with,
+                tooltip: "Move Points",
+                isEnabled: isMoveEnabled,
+                isActive: activeMode == EditorMode.edit,
+                onTap: onMove,
+                baseColor: iconColor,
+              ),
+              _ToolButton(
+                icon: Icons.delete_forever, // Icon for delete point
+                tooltip: "Delete Point",
+                isEnabled: isDeletePointEnabled,
+                isActive: activeMode == EditorMode.deletePoint,
+                onTap: onDeletePoint,
+                baseColor: iconColor,
+                iconData: Icons.remove_circle_outline,
+              ),
+              _ToolButton(
+                icon: Icons.swap_calls,
+                tooltip: "Reverse Track",
+                isEnabled: isReverseEnabled,
+                isActive: false, // Action is instant, no 'mode'
+                onTap: onReverse,
+                baseColor: iconColor,
+              ),
+              _ToolButton(
+                icon: Icons.auto_fix_high,
+                tooltip: "Simplify Track",
+                isEnabled: isSimplifyEnabled,
+                isActive: false, // Action is instant
+                onTap: onSimplify,
+                baseColor: iconColor,
+              ),
+              _ToolButton(
+                icon: Icons.add_location_alt,
+                tooltip: "Add Waypoint",
+                isEnabled: isCreateWaypointEnabled,
+                isActive: activeMode == EditorMode.createWaypoint,
+                onTap: onCreateWaypoint,
+                baseColor: iconColor,
+              ),
+            ],
+          ),
         ),
       ),
     );
   }
+}
 
-  Widget _buildToolBtn(IconData icon, String tooltip, VoidCallback onTap, {bool enabled = true, bool isActive = false}) {
+class _ToolButton extends StatelessWidget {
+  final IconData icon;
+  final IconData? iconData; // Optional override
+  final String tooltip;
+  final bool isEnabled;
+  final bool isActive;
+  final VoidCallback onTap;
+  final Color baseColor;
+
+  const _ToolButton({
+    required this.icon,
+    required this.tooltip,
+    required this.isEnabled,
+    required this.isActive,
+    required this.onTap,
+    required this.baseColor,
+    this.iconData,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    // Determine Colors
+    Color bg;
+    Color fg;
+
+    if (!isEnabled) {
+      bg = Colors.transparent;
+      fg = baseColor.withOpacity(0.2); // Disabled Grey
+    } else if (isActive) {
+      bg = Colors.blue;
+      fg = Colors.white;
+    } else {
+      bg = Colors.transparent;
+      fg = baseColor;
+    }
+
     return Tooltip(
-      message: tooltip,
-      child: Container(
-        decoration: isActive ? BoxDecoration(color: Colors.blue.withOpacity(0.2), shape: BoxShape.circle) : null,
-        child: IconButton(
-          icon: Icon(icon),
-          color: isActive ? Colors.blue : (enabled ? Colors.black : Colors.grey.withOpacity(0.3)),
-          onPressed: enabled ? onTap : null, 
-          splashRadius: 20, 
+      message: isEnabled ? tooltip : "$tooltip (Select a track)",
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: isEnabled ? onTap : null,
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            width: 48,
+            height: 48,
+            decoration: BoxDecoration(
+              color: bg,
+              borderRadius: BorderRadius.circular(8),
+              border: isActive 
+                  ? Border.all(color: Colors.blueAccent) 
+                  : Border.all(color: Colors.transparent),
+            ),
+            child: Icon(
+              iconData ?? icon,
+              color: fg,
+              size: 24,
+            ),
+          ),
         ),
       ),
     );
