@@ -24,7 +24,7 @@ jobs:
       # IMPORTANT: Replace /YOUR_REPO_NAME/ with your actual repository name
       # e.g. if your repo is 'beta-plot', this should be: --base-href "/beta-plot/"
       - name: Build Web
-        run: flutter build web --release --base-href "GPXEditor.git"
+        run: flutter build web --release --base-href "/GPXEditor/"
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
