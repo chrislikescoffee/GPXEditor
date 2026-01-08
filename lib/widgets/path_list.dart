@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart'; // NEW: Required for detecting Ctrl/Cmd keys
+import 'package:flutter/services.dart'; 
 import '../models/track_data.dart';
 
 class PathList extends StatefulWidget {
@@ -14,7 +14,8 @@ class PathList extends StatefulWidget {
   final VoidCallback onImport;
   final VoidCallback onSave;
   final VoidCallback onDelete;
-  final VoidCallback onJoin;
+  final VoidCallback onJoin;  // Linear Link
+  final VoidCallback onGroup; // Network/Branch Group
   final VoidCallback onCreateNew;
 
   const PathList({
@@ -31,6 +32,7 @@ class PathList extends StatefulWidget {
     required this.onSave,
     required this.onDelete,
     required this.onJoin,
+    required this.onGroup,
     required this.onCreateNew,
   });
 
@@ -84,6 +86,12 @@ class _PathListState extends State<PathList> {
 
   void _showRenameDialog(BuildContext context, String trackId, String currentName) {
     TextEditingController controller = TextEditingController(text: currentName);
+
+    void submit() {
+      widget.onRename(trackId, controller.text);
+      Navigator.of(context).pop();
+    }
+
     showDialog(
       context: context,
       builder: (ctx) {
@@ -92,6 +100,7 @@ class _PathListState extends State<PathList> {
           content: TextField(
             controller: controller,
             autofocus: true,
+            onSubmitted: (_) => submit(),
           ),
           actions: [
             TextButton(
@@ -99,11 +108,14 @@ class _PathListState extends State<PathList> {
               child: const Text("Cancel"),
             ),
             ElevatedButton(
-              onPressed: () {
-                widget.onRename(trackId, controller.text);
-                Navigator.of(ctx).pop();
-              },
-              child: const Text("Save"),
+              onPressed: submit,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green,
+                foregroundColor: Colors.white,
+                shape: const CircleBorder(),
+                padding: const EdgeInsets.all(10),
+              ),
+              child: const Icon(Icons.check),
             ),
           ],
         );
@@ -222,16 +234,36 @@ class _PathListState extends State<PathList> {
                           ],
                         ),
 
+                        // Title with Unsaved Indicator
                         title: GestureDetector(
                           onDoubleTap: () => _showRenameDialog(context, track.id, track.name),
-                          child: Text(
-                            track.name,
-                            style: TextStyle(
-                              fontSize: 13,
-                              fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
+                          child: Row(
+                            children: [
+                              Flexible(
+                                child: Text(
+                                  track.name,
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              if (!track.isSaved) ...[
+                                const SizedBox(width: 6),
+                                Tooltip(
+                                  message: "Unsaved changes",
+                                  child: Container(
+                                    width: 8, height: 8,
+                                    decoration: const BoxDecoration(
+                                      color: Colors.orange,
+                                      shape: BoxShape.circle,
+                                    ),
+                                  ),
+                                )
+                              ]
+                            ],
                           ),
                         ),
 
@@ -243,7 +275,6 @@ class _PathListState extends State<PathList> {
                           ),
                         ),
 
-                        // FIX: Detect Keyboard Modifiers for Multi-Select
                         onTap: () {
                           bool isMulti = HardwareKeyboard.instance.isControlPressed || 
                                          HardwareKeyboard.instance.isMetaPressed || 
@@ -270,19 +301,50 @@ class _PathListState extends State<PathList> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // 1. Join Paths (Conditionally Visible)
+              // 1. MULTI-SELECT ACTIONS (Join & Group)
               if (widget.selectedTrackIds.length > 1) ...[
-                SizedBox(
-                  height: 36,
-                  child: ElevatedButton.icon(
-                    onPressed: widget.onJoin,
-                    icon: const Icon(Icons.merge_type, size: 18),
-                    label: const Text("Join Selected Paths"),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: isDarkMode ? Colors.grey[800] : Colors.white,
-                      foregroundColor: isDarkMode ? Colors.white : Colors.black87,
+                Row(
+                  children: [
+                    // JOIN BUTTON (Linear)
+                    Expanded(
+                      child: Tooltip(
+                        message: "Connects paths end-to-end into a single continuous line.",
+                        child: SizedBox(
+                          height: 36,
+                          child: ElevatedButton.icon(
+                            onPressed: widget.onJoin,
+                            icon: const Icon(Icons.merge_type, size: 18),
+                            label: const Text("Join Paths"),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: isDarkMode ? Colors.grey[800] : Colors.white,
+                              foregroundColor: isDarkMode ? Colors.white : Colors.black87,
+                              padding: const EdgeInsets.symmetric(horizontal: 4),
+                            ),
+                          ),
+                        ),
+                      ),
                     ),
-                  ),
+                    const SizedBox(width: 8),
+                    // GROUP BUTTON (Network)
+                    Expanded(
+                      child: Tooltip(
+                        message: "Combines paths into one file but keeps them visually separate (e.g. branches).",
+                        child: SizedBox(
+                          height: 36,
+                          child: ElevatedButton.icon(
+                            onPressed: widget.onGroup,
+                            icon: const Icon(Icons.hub, size: 18), 
+                            label: const Text("Group Paths"),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: isDarkMode ? Colors.grey[800] : Colors.white,
+                              foregroundColor: isDarkMode ? Colors.white : Colors.black87,
+                              padding: const EdgeInsets.symmetric(horizontal: 4),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 8),
               ],

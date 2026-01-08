@@ -1,28 +1,16 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data'; // For Uint8List
-import 'package:flutter/foundation.dart' show kIsWeb; 
 import 'package:file_picker/file_picker.dart';
-import 'package:file_saver/file_saver.dart'; 
+import 'package:flutter/foundation.dart'; // For kIsWeb
 import 'package:gpx/gpx.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:cross_file/cross_file.dart'; // For Drag & Drop
+import 'package:universal_html/html.dart' as html; // Required for Web Download
 
-import '../models/track_data.dart';
-import '../models/waypoint_data.dart';
-
-// 1. CONTAINER CLASS 
-class GpxImportData {
-  final List<ImportedTrack> tracks;
-  final List<ImportedWaypoint> waypoints;
-
-  GpxImportData({required this.tracks, required this.waypoints});
-}
-
-// 2. HELPER MODELS
+// --- DATA MODELS ---
 class ImportedTrack {
   final String name;
   final List<List<LatLng>> segments;
-
   ImportedTrack({required this.name, required this.segments});
 }
 
@@ -35,8 +23,8 @@ class ImportedWaypoint {
   final String? link;
 
   ImportedWaypoint({
-    required this.name, 
-    required this.point, 
+    required this.name,
+    required this.point,
     this.description,
     this.comment,
     this.symbol,
@@ -44,16 +32,22 @@ class ImportedWaypoint {
   });
 }
 
-// 3. SERVICE LOGIC
+class GpxImportData {
+  final List<ImportedTrack> tracks;
+  final List<ImportedWaypoint> waypoints;
+  GpxImportData({required this.tracks, required this.waypoints});
+}
+
+// --- SERVICE CLASS ---
 class GpxService {
   
-  // --- IMPORT ---
-Future<GpxImportData> importFiles() async {
+  // 1. IMPORT VIA BUTTON (File Picker)
+  Future<GpxImportData> importFiles() async {
     FilePickerResult? result = await FilePicker.platform.pickFiles(
       allowMultiple: true,
       type: FileType.custom,
       allowedExtensions: ['gpx'],
-      withData: true, 
+      withData: true,
     );
 
     List<ImportedTrack> parsedTracks = [];
@@ -62,8 +56,6 @@ Future<GpxImportData> importFiles() async {
     if (result != null) {
       for (var file in result.files) {
         String xmlString = "";
-
-        // Get Filename without extension (e.g. "MyRoute.gpx" -> "MyRoute")
         String fallbackName = file.name.replaceAll(RegExp(r'\.gpx$', caseSensitive: false), '');
 
         try {
@@ -76,108 +68,142 @@ Future<GpxImportData> importFiles() async {
             }
           }
 
-          if (xmlString.isEmpty) continue;
-
-          final gpx = GpxReader().fromString(xmlString);
-
-          // A. Parse Tracks
-          for (var trk in gpx.trks) {
-            List<List<LatLng>> trackSegments = [];
-            for (var seg in trk.trksegs) {
-              List<LatLng> segmentPoints = seg.trkpts
-                  .map((pt) => LatLng(pt.lat!, pt.lon!))
-                  .toList();
-              if (segmentPoints.isNotEmpty) trackSegments.add(segmentPoints);
-            }
-
-            if (trackSegments.isNotEmpty) {
-              // LOGIC FIX: Use filename if internal name is empty or null
-              String finalName = (trk.name != null && trk.name!.isNotEmpty) 
-                  ? trk.name! 
-                  : fallbackName;
-
-              parsedTracks.add(ImportedTrack(
-                name: finalName,
-                segments: trackSegments,
-              ));
-            }
-          }
-
-          // B. Parse Waypoints
-          for (var wpt in gpx.wpts) {
-             // ... (Keep existing waypoint logic) ...
-             if (wpt.lat != null && wpt.lon != null) {
-              String? linkUrl;
-              if (wpt.links.isNotEmpty) linkUrl = wpt.links.first.href;
-
-              parsedWaypoints.add(ImportedWaypoint(
-                name: wpt.name ?? fallbackName, // Use filename as fallback for Waypoints too
-                point: LatLng(wpt.lat!, wpt.lon!),
-                description: wpt.desc,
-                comment: wpt.cmt,
-                symbol: wpt.sym,
-                link: linkUrl,
-              ));
-            }
+          if (xmlString.isNotEmpty) {
+            final data = _parseRawGpx(xmlString, fallbackName);
+            parsedTracks.addAll(data.tracks);
+            parsedWaypoints.addAll(data.waypoints);
           }
         } catch (e) {
           print("Error parsing GPX file ${file.name}: $e");
         }
       }
     }
+    return GpxImportData(tracks: parsedTracks, waypoints: parsedWaypoints);
+  }
+
+  // 2. IMPORT VIA DRAG & DROP
+  Future<GpxImportData> parseDragDropFiles(List<XFile> files) async {
+    List<ImportedTrack> parsedTracks = [];
+    List<ImportedWaypoint> parsedWaypoints = [];
+
+    for (var file in files) {
+      if (!file.name.toLowerCase().endsWith('.gpx')) continue;
+
+      String fallbackName = file.name.replaceAll(RegExp(r'\.gpx$', caseSensitive: false), '');
+      try {
+        String xmlString = await file.readAsString();
+        if (xmlString.isNotEmpty) {
+           final data = _parseRawGpx(xmlString, fallbackName);
+           parsedTracks.addAll(data.tracks);
+           parsedWaypoints.addAll(data.waypoints);
+        }
+      } catch (e) {
+        print("Error reading dropped file ${file.name}: $e");
+      }
+    }
 
     return GpxImportData(tracks: parsedTracks, waypoints: parsedWaypoints);
   }
-  
-  // --- EXPORT ---
-  Future<void> exportGpx(String fileName, List<TrackData> tracks, List<WaypointData> waypoints) async {
-    final gpx = Gpx();
-    gpx.creator = "Flutter GPX Editor";
-    gpx.metadata = Metadata(
-      time: DateTime.now(),
-      name: fileName,
-    );
 
-    // 1. Convert Waypoints
-    gpx.wpts = waypoints.where((w) => w.isVisible).map((wpt) {
-      final w = Wpt(
-        lat: wpt.point.latitude,
-        lon: wpt.point.longitude,
-        name: wpt.name,
-        desc: wpt.description,
-        cmt: wpt.comment,
-        sym: wpt.symbol,
-      );
-      if (wpt.link != null && wpt.link!.isNotEmpty) {
-        w.links = [Link(href: wpt.link!)];
+  // 3. SHARED PARSING LOGIC
+  GpxImportData _parseRawGpx(String xmlString, String fallbackName) {
+    List<ImportedTrack> tracks = [];
+    List<ImportedWaypoint> waypoints = [];
+
+    final gpx = GpxReader().fromString(xmlString);
+
+    // Parse Tracks
+    for (var trk in gpx.trks) {
+      List<List<LatLng>> trackSegments = [];
+      for (var seg in trk.trksegs) {
+        List<LatLng> segmentPoints = seg.trkpts
+            .map((pt) => LatLng(pt.lat!, pt.lon!))
+            .toList();
+        if (segmentPoints.isNotEmpty) trackSegments.add(segmentPoints);
       }
-      return w;
-    }).toList();
 
-    // 2. Convert Tracks
-    gpx.trks = tracks.where((t) => t.isVisible).map((trackData) {
-      final trk = Trk(name: trackData.name);
-      trk.trksegs = trackData.segments.map((segmentPoints) {
-        return Trkseg(
-          trkpts: segmentPoints.map((p) => Wpt(
-            lat: p.latitude,
-            lon: p.longitude,
-          )).toList(),
-        );
-      }).toList();
-      return trk;
-    }).toList();
+      if (trackSegments.isNotEmpty) {
+        String finalName = (trk.name != null && trk.name!.isNotEmpty) 
+            ? trk.name! 
+            : fallbackName;
 
-    // 3. Generate XML
+        tracks.add(ImportedTrack(
+          name: finalName,
+          segments: trackSegments,
+        ));
+      }
+    }
+
+    // Parse Waypoints
+    for (var wpt in gpx.wpts) {
+      if (wpt.lat != null && wpt.lon != null) {
+        String? linkUrl;
+        if (wpt.links.isNotEmpty) linkUrl = wpt.links.first.href;
+
+        waypoints.add(ImportedWaypoint(
+          name: wpt.name ?? fallbackName,
+          point: LatLng(wpt.lat!, wpt.lon!),
+          description: wpt.desc,
+          comment: wpt.cmt,
+          symbol: wpt.sym,
+          link: linkUrl,
+        ));
+      }
+    }
+
+    return GpxImportData(tracks: tracks, waypoints: waypoints);
+  }
+
+  // 4. EXPORT LOGIC
+  Future<void> exportGpx(String filename, List<dynamic> tracks, List<dynamic> waypoints) async {
+    final gpx = Gpx();
+    gpx.creator = "TimeInLoo GPX Editor";
+
+    // Convert Tracks
+    for (var t in tracks) {
+      final trk = Trk();
+      trk.name = t.name;
+      
+      for (var segPoints in t.segments) {
+        final seg = Trkseg();
+        for (var pt in segPoints) {
+          seg.trkpts.add(Wpt(lat: pt.latitude, lon: pt.longitude));
+        }
+        trk.trksegs.add(seg);
+      }
+      gpx.trks.add(trk);
+    }
+
+    // Convert Waypoints
+    for (var w in waypoints) {
+      final wpt = Wpt(
+        lat: w.point.latitude,
+        lon: w.point.longitude,
+        name: w.name,
+        desc: w.description,
+        cmt: w.comment,
+        sym: w.symbol,
+      );
+      if (w.link != null && w.link!.isNotEmpty) {
+        wpt.links.add(Link(href: w.link!));
+      }
+      gpx.wpts.add(wpt);
+    }
+
     final xmlString = GpxWriter().asString(gpx, pretty: true);
-    final List<int> bytes = utf8.encode(xmlString);
 
-    // 4. Save File (FIXED FOR VERSION 0.3.1)
-    await FileSaver.instance.saveFile(
-      name: fileName,
-      bytes: Uint8List.fromList(bytes),
-      fileExtension: 'gpx',    // Replaced 'ext' with 'fileExtension'
-      mimeType: MimeType.text, // Kept this as is
-    );
+    // Trigger Download (Web)
+    if (kIsWeb) {
+      final bytes = utf8.encode(xmlString);
+      final blob = html.Blob([bytes]);
+      final url = html.Url.createObjectUrlFromBlob(blob);
+      final anchor = html.AnchorElement(href: url)
+        ..setAttribute("download", "$filename.gpx")
+        ..click();
+      html.Url.revokeObjectUrl(url);
+    } else {
+      // Basic print for non-web environments just in case
+      print("Export content generated for $filename.gpx");
+    }
   }
 }

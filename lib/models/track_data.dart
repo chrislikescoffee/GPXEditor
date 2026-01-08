@@ -11,6 +11,7 @@ class TrackData {
   List<List<LatLng>> segments; 
   
   bool isVisible;
+  bool isSaved;
 
   TrackData({
     required this.id,
@@ -18,12 +19,15 @@ class TrackData {
     required this.color,
     required this.segments,
     this.isVisible = true,
+    this.isSaved = false,
+    
   });
 
   factory TrackData.create({
     required String name,
     required Color color,
     required List<List<LatLng>> segments,
+    bool isSaved = false,
   }) {
     return TrackData(
       id: const Uuid().v4(),

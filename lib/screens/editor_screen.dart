@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:math' as math;
-import 'package:flutter/gestures.dart'; // Required for PointerHoverEvent
+import 'package:flutter/gestures.dart'; 
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_map_cancellable_tile_provider/flutter_map_cancellable_tile_provider.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:desktop_drop/desktop_drop.dart'; // Drag & Drop
+import 'package:cross_file/cross_file.dart';    // File Type
 
 // Widgets
 import '../widgets/tool_palette.dart';
@@ -33,7 +35,6 @@ class _EditorScreenState extends State<EditorScreen> {
   List<WaypointData> waypoints = []; 
   Set<String> _selectedTrackIds = {};
   
-  // Color Palette
   final List<Color> _trackColors = [
     Colors.blue, Colors.orange, Colors.purple, Colors.green, 
     Colors.teal, Colors.red, Colors.pink, Colors.indigo, 
@@ -49,10 +50,13 @@ class _EditorScreenState extends State<EditorScreen> {
   bool get _isDarkTheme => _mapStyleIndex == 1 || _mapStyleIndex == 2;
 
   // Cut Tool State
-  LatLng? _previewCutPoint; 
+  LatLng? _previewCutPoint;
+  List<LatLng>? _previewGreenPath; // Path BEFORE the cut
+  List<LatLng>? _previewRedPath;   // Path AFTER the cut
   
   // UI State
   bool _isLoading = false;
+  bool _isDraggingFile = false; // For DropTarget overlay
   String? _statusMessage;
   Timer? _statusTimer;
 
@@ -101,7 +105,6 @@ class _EditorScreenState extends State<EditorScreen> {
   void _fitToContent() {
     if (tracks.isEmpty && waypoints.isEmpty) return;
 
-    // 1. Collect all points
     List<LatLng> allPoints = [];
     for (var t in tracks) {
       if (t.isVisible) {
@@ -116,10 +119,7 @@ class _EditorScreenState extends State<EditorScreen> {
 
     if (allPoints.isEmpty) return;
 
-    // 2. Calculate Bounds
     final bounds = LatLngBounds.fromPoints(allPoints);
-
-    // 3. Fit Camera (with padding)
     _mapController.fitCamera(
       CameraFit.bounds(
         bounds: bounds,
@@ -128,40 +128,64 @@ class _EditorScreenState extends State<EditorScreen> {
     );
   }
 
-  // --- HOVER LOGIC (For Cut Tool) ---
+  // --- HOVER LOGIC (Smart Cut Tool) ---
   void _handleHover(PointerHoverEvent event) {
-    // Only run expensive math if we are in Cut Mode and have a track selected
     if (_currentMode != EditorMode.cut || _primarySelectedTrack == null) {
-      if (_previewCutPoint != null) setState(() => _previewCutPoint = null);
+      if (_previewCutPoint != null) {
+        setState(() {
+          _previewCutPoint = null;
+          _previewGreenPath = null;
+          _previewRedPath = null;
+        });
+      }
       return;
     }
 
-    // 1. Convert Screen Pixels -> LatLng
-    // event.localPosition gives coordinates relative to the map widget
     final point = _mapController.camera.pointToLatLng(
       math.Point(event.localPosition.dx, event.localPosition.dy)
     );
 
-    // 2. Find nearest point
     final targetTrack = _primarySelectedTrack!;
-    LatLng? bestCandidate;
+    LatLng? bestPoint;
     double closestDist = double.infinity;
+    
+    int bestSegIndex = -1;
+    int bestSplitIndex = -1; 
 
-    for (var seg in targetTrack.segments) {
-      // Use smaller threshold (e.g. 200m) for visual snap
+    for (int i = 0; i < targetTrack.segments.length; i++) {
+      var seg = targetTrack.segments[i];
       var result = GeoUtils.findNearestPointOnLine(point, seg, thresholdMeters: 200); 
+      
       if (result != null) {
         final dist = const Distance().as(LengthUnit.Meter, point, result.$2);
         if (dist < closestDist) {
           closestDist = dist;
-          bestCandidate = result.$2;
+          bestPoint = result.$2;
+          bestSegIndex = i;
+          bestSplitIndex = result.$1;
         }
       }
     }
 
-    if (_previewCutPoint != bestCandidate) {
+    if (bestPoint != _previewCutPoint) {
+      List<LatLng>? green;
+      List<LatLng>? red;
+
+      if (bestPoint != null && bestSegIndex != -1) {
+        // Construct Green Path (Start -> Cut)
+        final fullSegment = targetTrack.segments[bestSegIndex];
+        green = fullSegment.sublist(0, bestSplitIndex + 1);
+        green.add(bestPoint);
+
+        // Construct Red Path (Cut -> End)
+        red = [bestPoint];
+        red.addAll(fullSegment.sublist(bestSplitIndex + 1));
+      }
+
       setState(() {
-        _previewCutPoint = bestCandidate;
+        _previewCutPoint = bestPoint;
+        _previewGreenPath = green;
+        _previewRedPath = red;
       });
     }
   }
@@ -174,53 +198,66 @@ class _EditorScreenState extends State<EditorScreen> {
 
     try {
       final importData = await _gpxService.importFiles();
-      
-      setState(() {
-        // 1. Process Tracks
-        if (importData.tracks.isNotEmpty) {
-          for (var data in importData.tracks) {
-            String uniqueName = _getUniqueName(data.name);
-            Color assignedColor = _trackColors[tracks.length % _trackColors.length];
-
-            final newTrack = TrackData.create(
-              name: uniqueName,
-              color: assignedColor,
-              segments: data.segments,
-            );
-            tracks.add(newTrack);
-            _selectedTrackIds.add(newTrack.id);
-          }
-        }
-
-        // 2. Process Waypoints
-        if (importData.waypoints.isNotEmpty) {
-          for (var wpt in importData.waypoints) {
-            waypoints.add(WaypointData.create(
-              name: wpt.name,
-              point: wpt.point,
-              description: wpt.description,
-              comment: wpt.comment,
-              symbol: wpt.symbol,
-              link: wpt.link,
-              color: Colors.red,
-            ));
-          }
-        }
-      });
-
-      // Zoom logic
-      if (tracks.isNotEmpty && tracks.last.segments.isNotEmpty && tracks.last.segments.first.isNotEmpty) {
-        _mapController.move(tracks.last.segments.first.first, 16.0);
-      } else if (waypoints.isNotEmpty) {
-        _mapController.move(waypoints.last.point, 16.0);
-      }
-      
-      _showStatus("Imported ${importData.tracks.length} tracks, ${importData.waypoints.length} waypoints.");
-
+      _processImportedData(importData);
+      _showStatus("Imported ${importData.tracks.length} tracks.");
     } catch (e) {
       _showStatus("Error importing files: $e");
     } finally {
       setState(() => _isLoading = false);
+    }
+  }
+
+  void _handleDroppedFiles(List<XFile> files) async {
+    setState(() => _isLoading = true);
+    try {
+      final importData = await _gpxService.parseDragDropFiles(files);
+      _processImportedData(importData);
+      _showStatus("Imported ${importData.tracks.length} tracks from drop.");
+    } catch (e) {
+      _showStatus("Error processing drop: $e");
+    } finally {
+      setState(() => _isLoading = false);
+    }
+  }
+
+  void _processImportedData(GpxImportData importData) {
+    setState(() {
+      // 1. Process Tracks
+      if (importData.tracks.isNotEmpty) {
+        for (var data in importData.tracks) {
+          String uniqueName = _getUniqueName(data.name);
+          Color assignedColor = _trackColors[tracks.length % _trackColors.length];
+
+          final newTrack = TrackData.create(
+            name: uniqueName,
+            color: assignedColor,
+            segments: data.segments,
+            isSaved: true, // Imported files are "saved"
+          );
+          tracks.add(newTrack);
+          _selectedTrackIds.add(newTrack.id);
+        }
+      }
+
+      // 2. Process Waypoints
+      if (importData.waypoints.isNotEmpty) {
+        for (var wpt in importData.waypoints) {
+          waypoints.add(WaypointData.create(
+            name: wpt.name,
+            point: wpt.point,
+            description: wpt.description,
+            comment: wpt.comment,
+            symbol: wpt.symbol,
+            link: wpt.link,
+            color: Colors.red,
+          ));
+        }
+      }
+    });
+
+    // Zoom Logic
+    if (importData.tracks.isNotEmpty || importData.waypoints.isNotEmpty) {
+      _fitToContent();
     }
   }
 
@@ -235,13 +272,12 @@ class _EditorScreenState extends State<EditorScreen> {
     _showStatus("Deleted $count tracks.");
   }
 
- void _handleSave() async {
-    // 1. Determine what to export
+  void _handleSave() async {
+    // 1. Determine targets
     List<TrackData> targets = [];
     if (_selectedTrackIds.isNotEmpty) {
       targets = tracks.where((t) => _selectedTrackIds.contains(t.id)).toList();
     } else {
-      // If nothing is selected, assume the user wants to export EVERYTHING as individual files
       targets = List.from(tracks);
     }
 
@@ -251,30 +287,24 @@ class _EditorScreenState extends State<EditorScreen> {
     }
 
     setState(() => _isLoading = true);
-
     int count = 0;
 
     try {
-      // 2. Export Tracks (One file per track)
+      // 2. Export Tracks
       for (var track in targets) {
-        // We include global waypoints in every file to ensure they aren't lost.
-        // If you prefer waypoints ONLY in a specific file, we would pass empty list [] here.
         await _gpxService.exportGpx(track.name, [track], waypoints);
+        setState(() => track.isSaved = true);
         count++;
-        
-        // Small delay is crucial for Web to allow multiple download triggers
         await Future.delayed(const Duration(milliseconds: 500));
       }
 
-      // 3. Edge Case: Only Waypoints exist (no tracks)
+      // 3. Export Waypoints only
       if (targets.isEmpty && waypoints.isNotEmpty) {
          await _gpxService.exportGpx("waypoints", [], waypoints);
-         // We don't increment 'count' for the dialog logic below unless you consider this a "path"
-         // But for clarity, let's say:
          if (count == 0) count = 1; 
       }
 
-      // 4. Success Dialog (as requested)
+      // 4. Summary
       if (mounted) {
          showDialog(
            context: context,
@@ -290,7 +320,6 @@ class _EditorScreenState extends State<EditorScreen> {
            ),
          );
       }
-
     } catch (e) {
       _showStatus("Export failed: $e");
     } finally {
@@ -307,6 +336,7 @@ class _EditorScreenState extends State<EditorScreen> {
         name: _getUniqueName("New Route"),
         color: Colors.red,
         segments: [[]],
+        isSaved: false, 
       );
       tracks.add(newTrack);
       _selectedTrackIds.clear();
@@ -348,6 +378,10 @@ class _EditorScreenState extends State<EditorScreen> {
       _selectedTrackIds.clear();
       _selectedTrackIds.add(part1.id);
       _currentMode = EditorMode.view;
+
+      _previewCutPoint = null;
+      _previewGreenPath = null;
+      _previewRedPath = null;
     });
     _showStatus("Track split successfully.");
   }
@@ -358,16 +392,20 @@ class _EditorScreenState extends State<EditorScreen> {
       List<TrackData> tracksToJoin = tracks.where((t) => _selectedTrackIds.contains(t.id)).toList();
       tracksToJoin.sort((a, b) => tracks.indexOf(a).compareTo(tracks.indexOf(b)));
 
-      List<List<LatLng>> mergedSegments = [];
+      // FLATTEN all segments into ONE continuous list
+      List<LatLng> singleContinuousSegment = [];
       for (var t in tracksToJoin) {
-        mergedSegments.addAll(t.segments);
+        for (var seg in t.segments) {
+          singleContinuousSegment.addAll(seg);
+        }
       }
 
       final firstTrack = tracksToJoin.first;
       final newTrack = TrackData.create(
-        name: "${firstTrack.name} (Merged)",
+        name: "${firstTrack.name} (Joined)",
         color: firstTrack.color,
-        segments: mergedSegments,
+        segments: [singleContinuousSegment], 
+        isSaved: false, 
       );
 
       for (var t in tracksToJoin) tracks.remove(t);
@@ -375,7 +413,35 @@ class _EditorScreenState extends State<EditorScreen> {
       _selectedTrackIds.clear();
       _selectedTrackIds.add(newTrack.id);
     });
-    _showStatus("Tracks joined successfully.");
+    _showStatus("Tracks joined into a single continuous path.");
+  }
+
+  void _handleGroup() {
+    if (_selectedTrackIds.length < 2) return;
+    setState(() {
+      List<TrackData> tracksToGroup = tracks.where((t) => _selectedTrackIds.contains(t.id)).toList();
+      tracksToGroup.sort((a, b) => tracks.indexOf(a).compareTo(tracks.indexOf(b)));
+
+      // COLLECT segments but keep them SEPARATE (Network/Branches)
+      List<List<LatLng>> collectedSegments = [];
+      for (var t in tracksToGroup) {
+        collectedSegments.addAll(t.segments);
+      }
+
+      final firstTrack = tracksToGroup.first;
+      final newTrack = TrackData.create(
+        name: "${firstTrack.name} (Group)",
+        color: firstTrack.color,
+        segments: collectedSegments,
+        isSaved: false, 
+      );
+
+      for (var t in tracksToGroup) tracks.remove(t);
+      tracks.insert(0, newTrack);
+      _selectedTrackIds.clear();
+      _selectedTrackIds.add(newTrack.id);
+    });
+    _showStatus("Tracks grouped into a network.");
   }
 
   void _handleReverse() {
@@ -387,6 +453,7 @@ class _EditorScreenState extends State<EditorScreen> {
       for (var id in _selectedTrackIds) {
         final track = tracks.firstWhere((t) => t.id == id);
         track.segments = track.segments.reversed.map((seg) => seg.reversed.toList()).toList();
+        track.isSaved = false;
       }
     });
     _showStatus("Reversed ${_selectedTrackIds.length} tracks.");
@@ -415,7 +482,6 @@ class _EditorScreenState extends State<EditorScreen> {
 
   void _handleSimplify() {
     if (_primarySelectedTrack == null) return;
-    
     double tolerance = 5.0; 
     
     showDialog(
@@ -467,6 +533,7 @@ class _EditorScreenState extends State<EditorScreen> {
         totalPointsAfter += simpleSeg.length;
       }
       track.segments = newSegments;
+      track.isSaved = false;
     });
 
     _showStatus("Simplified: Removed ${totalPointsBefore - totalPointsAfter} points.");
@@ -478,6 +545,7 @@ class _EditorScreenState extends State<EditorScreen> {
     final newLatLng = _mapController.camera.pointToLatLng(point);
     setState(() {
       _primarySelectedTrack!.segments[segIndex][pointIndex] = newLatLng;
+      _primarySelectedTrack!.isSaved = false;
     });
   }
 
@@ -493,7 +561,6 @@ class _EditorScreenState extends State<EditorScreen> {
       context: context,
       builder: (ctx) {
         bool isEditing = false;
-        
         final nameCtrl = TextEditingController(text: wpt.name);
         final descCtrl = TextEditingController(text: wpt.description ?? "");
         final cmtCtrl = TextEditingController(text: wpt.comment ?? "");
@@ -543,7 +610,6 @@ class _EditorScreenState extends State<EditorScreen> {
                     onPressed: () => setDialogState(() => isEditing = false), 
                     child: const Text("Cancel Edit"),
                   ),
-                
                 if (isEditing)
                    TextButton(
                     onPressed: () {
@@ -559,7 +625,6 @@ class _EditorScreenState extends State<EditorScreen> {
                     },
                     child: const Text("Save"),
                   ),
-
                 if (!isEditing) ...[
                   TextButton(
                     style: TextButton.styleFrom(foregroundColor: Colors.red),
@@ -637,6 +702,7 @@ class _EditorScreenState extends State<EditorScreen> {
     setState(() {
       final track = tracks.firstWhere((t) => t.id == id);
       track.color = color;
+      track.isSaved = false;
     });
   }
 
@@ -644,6 +710,7 @@ class _EditorScreenState extends State<EditorScreen> {
     setState(() {
       final track = tracks.firstWhere((t) => t.id == id);
       track.name = name;
+      track.isSaved = false;
     });
   }
 
@@ -658,6 +725,7 @@ class _EditorScreenState extends State<EditorScreen> {
         } else {
           _primarySelectedTrack!.segments.last.add(point);
         }
+        _primarySelectedTrack!.isSaved = false;
       });
       return;
     }
@@ -678,6 +746,7 @@ class _EditorScreenState extends State<EditorScreen> {
         } else {
           _primarySelectedTrack!.segments.first.insert(0, point);
         }
+        _primarySelectedTrack!.isSaved = false;
       });
       return;
     }
@@ -701,7 +770,7 @@ class _EditorScreenState extends State<EditorScreen> {
     if (_currentMode == EditorMode.cut && _primarySelectedTrack != null) {
       final targetTrack = _primarySelectedTrack!;
       
-      // OPTIMIZED: Use the ghost preview point if available for 100% precision
+      // OPTIMIZED: Use the ghost preview point
       if (_previewCutPoint != null) {
         for (int i = 0; i < targetTrack.segments.length; i++) {
            var seg = targetTrack.segments[i];
@@ -709,13 +778,12 @@ class _EditorScreenState extends State<EditorScreen> {
            var result = GeoUtils.findNearestPointOnLine(_previewCutPoint!, seg, thresholdMeters: 5);
            if (result != null) {
              _performCut(targetTrack, i, result.$1, result.$2);
-             setState(() => _previewCutPoint = null); 
              return;
            }
          }
       }
 
-      // Fallback for click if mouse hover wasn't active
+      // Fallback for click (Mobile)
       double bestDist = double.infinity;
       int bestSegIndex = -1;
       int bestSplitIndex = -1;
@@ -755,7 +823,7 @@ class _EditorScreenState extends State<EditorScreen> {
         if (isSel) {
           borderPolylines.add(Polyline(
             points: seg, strokeWidth: 8.0, 
-            color: _isDarkTheme ? Colors.white : Colors.black, // Invert border for contrast
+            color: _isDarkTheme ? Colors.white : Colors.black, 
             borderColor: _isDarkTheme ? Colors.black : Colors.white, borderStrokeWidth: 1.0, 
           ));
         }
@@ -765,7 +833,7 @@ class _EditorScreenState extends State<EditorScreen> {
       }
     }
 
-    // 2. Markers (Waypoints & Endpoints)
+    // 2. Markers
     List<Marker> markers = [];
     
     // -- WAYPOINTS --
@@ -888,6 +956,7 @@ class _EditorScreenState extends State<EditorScreen> {
                      _selectedTrackIds.clear();
                      _currentMode = EditorMode.view;
                    }
+                   track.isSaved = false;
                  });
                  _showStatus("Point removed.");
                },
@@ -916,7 +985,7 @@ class _EditorScreenState extends State<EditorScreen> {
           Expanded(
             child: Stack(
               children: [
-                // WRAP FLUTTERMAP IN MOUSEREGION FOR HOVER
+                // MAP LAYER with HOVER and DRAG & DROP
                 MouseRegion(
                   onHover: _handleHover,
                   cursor: _currentMode == EditorMode.cut 
@@ -932,28 +1001,41 @@ class _EditorScreenState extends State<EditorScreen> {
                     children: [
                       TileLayer(
                         tileProvider: CancellableNetworkTileProvider(),
-                        
-                        // 3-Stage Map Toggle: Light -> Dark Grey -> Satellite
                         urlTemplate: _mapStyleIndex == 0
-                            ? 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png' // Light
+                            ? 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png'
                             : _mapStyleIndex == 1
-                                ? 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}' // Dark Grey
-                                : 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', // Satellite
-                        
+                                ? 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}'
+                                : 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
                         subdomains: const ['a', 'b', 'c', 'd'],
                         userAgentPackageName: 'com.timeinloo.gpx_editor',
                       ),
+                      
                       PolylineLayer(polylines: borderPolylines),
                       PolylineLayer(polylines: trackPolylines),
+
+                      // --- NEW: CUT PREVIEW GLOW ---
+                      if (_currentMode == EditorMode.cut && _previewGreenPath != null && _previewRedPath != null)
+                        PolylineLayer(
+                          polylines: [
+                            Polyline(
+                              points: _previewGreenPath!,
+                              strokeWidth: 6.0,
+                              color: Colors.greenAccent.withOpacity(0.8),
+                            ),
+                            Polyline(
+                              points: _previewRedPath!,
+                              strokeWidth: 6.0,
+                              color: Colors.redAccent.withOpacity(0.8),
+                            ),
+                          ],
+                        ),
                       
                       MarkerLayer(markers: [
                         ...markers,
-                        // --- GHOST SCISSORS (CUT PREVIEW) ---
                         if (_currentMode == EditorMode.cut && _previewCutPoint != null)
                           Marker(
                             point: _previewCutPoint!,
-                            width: 30,
-                            height: 30,
+                            width: 30, height: 30,
                             child: Transform.translate(
                               offset: const Offset(0, -15),
                               child: const Icon(
@@ -1013,7 +1095,7 @@ class _EditorScreenState extends State<EditorScreen> {
                      ),
                    ),
 
-                // --- CONTROLS (Zoom, Pan, Map Style) ---
+                // --- CONTROLS ---
                 Positioned(
                   bottom: 20,
                   right: 20, 
@@ -1064,9 +1146,9 @@ class _EditorScreenState extends State<EditorScreen> {
                         },
                         tooltip: "Switch Map Layer",
                         child: Icon(
-                          _mapStyleIndex == 0 ? Icons.wb_sunny_outlined // Sun for Light
-                          : _mapStyleIndex == 1 ? Icons.dark_mode       // Moon for Dark
-                          : Icons.satellite_alt,                        // Satellite Icon
+                          _mapStyleIndex == 0 ? Icons.wb_sunny_outlined
+                          : _mapStyleIndex == 1 ? Icons.dark_mode       
+                          : Icons.satellite_alt,                        
                           
                           color: _isDarkTheme ? Colors.white : Colors.grey[800],
                         ),
@@ -1102,44 +1184,85 @@ class _EditorScreenState extends State<EditorScreen> {
             ),
           ),
 
-          // --- PATH LIST ---
+          // --- PATH LIST + DRAG & DROP ZONE ---
           SizedBox(
             width: 250, 
-            child: Container(
-              color: _isDarkTheme ? const Color(0xFF121212) : Colors.white, 
-              child: Theme(
-                // FORCE EXPLICIT THEME DATA
-                data: _isDarkTheme 
-                    ? ThemeData.dark().copyWith(
-                        scaffoldBackgroundColor: const Color(0xFF121212),
-                        cardColor: const Color(0xFF2C2C2C), 
-                        dividerColor: Colors.grey[800],
-                        textTheme: ThemeData.dark().textTheme.apply(
-                          bodyColor: Colors.white,
-                          displayColor: Colors.white,
+            child: DropTarget(
+              onDragDone: (details) {
+                setState(() => _isDraggingFile = false);
+                _handleDroppedFiles(details.files);
+              },
+              onDragEntered: (details) {
+                setState(() => _isDraggingFile = true);
+              },
+              onDragExited: (details) {
+                setState(() => _isDraggingFile = false);
+              },
+              child: Stack(
+                children: [
+                  Container(
+                    color: _isDarkTheme ? const Color(0xFF121212) : Colors.white, 
+                    child: Theme(
+                      data: _isDarkTheme 
+                          ? ThemeData.dark().copyWith(
+                              scaffoldBackgroundColor: const Color(0xFF121212),
+                              cardColor: const Color(0xFF2C2C2C), 
+                              dividerColor: Colors.grey[800],
+                              textTheme: ThemeData.dark().textTheme.apply(
+                                bodyColor: Colors.white,
+                                displayColor: Colors.white,
+                              ),
+                              iconTheme: const IconThemeData(color: Colors.white),
+                              listTileTheme: const ListTileThemeData(
+                                textColor: Colors.white,
+                                iconColor: Colors.white,
+                              ),
+                            ) 
+                          : ThemeData.light(),
+                      child: PathList(
+                        tracks: tracks,
+                        selectedTrackIds: _selectedTrackIds,
+                        onSelect: _handleSelect,
+                        onSelectAll: _handleSelectAll,
+                        onReorder: _handleReorder,
+                        onToggleVisibility: _handleToggleVis,
+                        onColorChanged: _handleColorChange,
+                        onRename: _handleRename,
+                        onImport: _handleImport,
+                        onSave: _handleSave,
+                        onDelete: _handleDeleteSelected,
+                        onJoin: _handleJoin,
+                        onGroup: _handleGroup,
+                        onCreateNew: _handleCreateNew,
+                      ),
+                    ),
+                  ),
+
+                  // DRAG OVERLAY
+                  if (_isDraggingFile)
+                    Positioned.fill(
+                      child: Container(
+                        color: Colors.blue.withOpacity(0.8),
+                        child: const Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.upload_file, color: Colors.white, size: 48),
+                              SizedBox(height: 10),
+                              Text(
+                                "Drop GPX files here",
+                                style: TextStyle(
+                                  color: Colors.white, 
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 16
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
-                        iconTheme: const IconThemeData(color: Colors.white),
-                        listTileTheme: const ListTileThemeData(
-                          textColor: Colors.white,
-                          iconColor: Colors.white,
-                        ),
-                      ) 
-                    : ThemeData.light(),
-                child: PathList(
-                  tracks: tracks,
-                  selectedTrackIds: _selectedTrackIds,
-                  onSelect: _handleSelect,
-                  onSelectAll: _handleSelectAll,
-                  onReorder: _handleReorder,
-                  onToggleVisibility: _handleToggleVis,
-                  onColorChanged: _handleColorChange,
-                  onRename: _handleRename,
-                  onImport: _handleImport,
-                  onSave: _handleSave,
-                  onDelete: _handleDeleteSelected,
-                  onJoin: _handleJoin,
-                  onCreateNew: _handleCreateNew,
-                ),
+                      ),
+                    ),
+                ],
               ),
             ),
           ),
