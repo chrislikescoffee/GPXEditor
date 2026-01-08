@@ -1,9 +1,10 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'package:flutter/gestures.dart'; // Required for PointerHoverEvent
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
-import 'package:latlong2/latlong.dart';
 import 'package:flutter_map_cancellable_tile_provider/flutter_map_cancellable_tile_provider.dart';
+import 'package:latlong2/latlong.dart';
 
 // Widgets
 import '../widgets/tool_palette.dart';
@@ -42,7 +43,13 @@ class _EditorScreenState extends State<EditorScreen> {
   // State
   EditorMode _currentMode = EditorMode.view;
   bool? _extendFromEnd;
-  bool _isDarkMode = false; // New State for Theme
+  
+  // Map Style: 0 = Light, 1 = Dark Grey, 2 = Satellite
+  int _mapStyleIndex = 0; 
+  bool get _isDarkTheme => _mapStyleIndex == 1 || _mapStyleIndex == 2;
+
+  // Cut Tool State
+  LatLng? _previewCutPoint; 
   
   // UI State
   bool _isLoading = false;
@@ -121,6 +128,44 @@ class _EditorScreenState extends State<EditorScreen> {
     );
   }
 
+  // --- HOVER LOGIC (For Cut Tool) ---
+  void _handleHover(PointerHoverEvent event) {
+    // Only run expensive math if we are in Cut Mode and have a track selected
+    if (_currentMode != EditorMode.cut || _primarySelectedTrack == null) {
+      if (_previewCutPoint != null) setState(() => _previewCutPoint = null);
+      return;
+    }
+
+    // 1. Convert Screen Pixels -> LatLng
+    // event.localPosition gives coordinates relative to the map widget
+    final point = _mapController.camera.pointToLatLng(
+      math.Point(event.localPosition.dx, event.localPosition.dy)
+    );
+
+    // 2. Find nearest point
+    final targetTrack = _primarySelectedTrack!;
+    LatLng? bestCandidate;
+    double closestDist = double.infinity;
+
+    for (var seg in targetTrack.segments) {
+      // Use smaller threshold (e.g. 200m) for visual snap
+      var result = GeoUtils.findNearestPointOnLine(point, seg, thresholdMeters: 200); 
+      if (result != null) {
+        final dist = const Distance().as(LengthUnit.Meter, point, result.$2);
+        if (dist < closestDist) {
+          closestDist = dist;
+          bestCandidate = result.$2;
+        }
+      }
+    }
+
+    if (_previewCutPoint != bestCandidate) {
+      setState(() {
+        _previewCutPoint = bestCandidate;
+      });
+    }
+  }
+
   // --- FILE ACTIONS ---
 
   Future<void> _handleImport() async {
@@ -190,55 +235,67 @@ class _EditorScreenState extends State<EditorScreen> {
     _showStatus("Deleted $count tracks.");
   }
 
-  void _handleSave() {
-    if (tracks.isEmpty && waypoints.isEmpty) {
+ void _handleSave() async {
+    // 1. Determine what to export
+    List<TrackData> targets = [];
+    if (_selectedTrackIds.isNotEmpty) {
+      targets = tracks.where((t) => _selectedTrackIds.contains(t.id)).toList();
+    } else {
+      // If nothing is selected, assume the user wants to export EVERYTHING as individual files
+      targets = List.from(tracks);
+    }
+
+    if (targets.isEmpty && waypoints.isEmpty) {
       _showStatus("Nothing to export.");
       return;
     }
 
-    TextEditingController nameCtrl = TextEditingController(text: "my_route");
-    
-    showDialog(
-      context: context,
-      builder: (ctx) {
-        return AlertDialog(
-          title: const Text("Export GPX"),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text("Enter a name for your file:"),
-              TextField(
-                controller: nameCtrl,
-                autofocus: true,
-                decoration: const InputDecoration(suffixText: ".gpx"),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text("Cancel"),
-            ),
-            ElevatedButton(
-              onPressed: () async {
-                Navigator.of(ctx).pop(); 
-                final name = nameCtrl.text.isEmpty ? "export" : nameCtrl.text;
-                try {
-                  setState(() => _isLoading = true);
-                  await _gpxService.exportGpx(name, tracks, waypoints);
-                  _showStatus("File exported successfully.");
-                } catch (e) {
-                  _showStatus("Export failed: $e");
-                } finally {
-                  setState(() => _isLoading = false);
-                }
-              },
-              child: const Text("Export"),
-            ),
-          ],
-        );
-      },
-    );
+    setState(() => _isLoading = true);
+
+    int count = 0;
+
+    try {
+      // 2. Export Tracks (One file per track)
+      for (var track in targets) {
+        // We include global waypoints in every file to ensure they aren't lost.
+        // If you prefer waypoints ONLY in a specific file, we would pass empty list [] here.
+        await _gpxService.exportGpx(track.name, [track], waypoints);
+        count++;
+        
+        // Small delay is crucial for Web to allow multiple download triggers
+        await Future.delayed(const Duration(milliseconds: 500));
+      }
+
+      // 3. Edge Case: Only Waypoints exist (no tracks)
+      if (targets.isEmpty && waypoints.isNotEmpty) {
+         await _gpxService.exportGpx("waypoints", [], waypoints);
+         // We don't increment 'count' for the dialog logic below unless you consider this a "path"
+         // But for clarity, let's say:
+         if (count == 0) count = 1; 
+      }
+
+      // 4. Success Dialog (as requested)
+      if (mounted) {
+         showDialog(
+           context: context,
+           builder: (ctx) => AlertDialog(
+             title: const Text("Export Complete"),
+             content: Text("$count path(s) saved to your downloads."),
+             actions: [
+               TextButton(
+                 onPressed: () => Navigator.of(ctx).pop(),
+                 child: const Text("OK"),
+               )
+             ],
+           ),
+         );
+      }
+
+    } catch (e) {
+      _showStatus("Export failed: $e");
+    } finally {
+      setState(() => _isLoading = false);
+    }
   }
 
   // --- TRACK TOOLS ---
@@ -644,6 +701,21 @@ class _EditorScreenState extends State<EditorScreen> {
     if (_currentMode == EditorMode.cut && _primarySelectedTrack != null) {
       final targetTrack = _primarySelectedTrack!;
       
+      // OPTIMIZED: Use the ghost preview point if available for 100% precision
+      if (_previewCutPoint != null) {
+        for (int i = 0; i < targetTrack.segments.length; i++) {
+           var seg = targetTrack.segments[i];
+           // Use tiny threshold because point is exact
+           var result = GeoUtils.findNearestPointOnLine(_previewCutPoint!, seg, thresholdMeters: 5);
+           if (result != null) {
+             _performCut(targetTrack, i, result.$1, result.$2);
+             setState(() => _previewCutPoint = null); 
+             return;
+           }
+         }
+      }
+
+      // Fallback for click if mouse hover wasn't active
       double bestDist = double.infinity;
       int bestSegIndex = -1;
       int bestSplitIndex = -1;
@@ -683,8 +755,8 @@ class _EditorScreenState extends State<EditorScreen> {
         if (isSel) {
           borderPolylines.add(Polyline(
             points: seg, strokeWidth: 8.0, 
-            color: _isDarkMode ? Colors.white : Colors.black, // Invert border for contrast
-            borderColor: _isDarkMode ? Colors.black : Colors.white, borderStrokeWidth: 1.0, 
+            color: _isDarkTheme ? Colors.white : Colors.black, // Invert border for contrast
+            borderColor: _isDarkTheme ? Colors.black : Colors.white, borderStrokeWidth: 1.0, 
           ));
         }
         trackPolylines.add(Polyline(
@@ -710,9 +782,9 @@ class _EditorScreenState extends State<EditorScreen> {
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
                 decoration: BoxDecoration(
-                  color: _isDarkMode ? Colors.black87 : Colors.white.withOpacity(0.9), 
+                  color: _isDarkTheme ? Colors.black87 : Colors.white.withOpacity(0.9), 
                   borderRadius: BorderRadius.circular(4),
-                  border: Border.all(color: _isDarkMode ? Colors.white54 : Colors.grey),
+                  border: Border.all(color: _isDarkTheme ? Colors.white54 : Colors.grey),
                 ),
                 child: Text(
                   wpt.name, 
@@ -721,7 +793,7 @@ class _EditorScreenState extends State<EditorScreen> {
                   style: TextStyle(
                     fontSize: 10, 
                     fontWeight: FontWeight.bold,
-                    color: _isDarkMode ? Colors.white : Colors.black
+                    color: _isDarkTheme ? Colors.white : Colors.black
                   )
                 ),
               ),
@@ -844,36 +916,66 @@ class _EditorScreenState extends State<EditorScreen> {
           Expanded(
             child: Stack(
               children: [
-                FlutterMap(
-                  mapController: _mapController,
-                  options: MapOptions(
-                    initialCenter: const LatLng(51.509364, -0.128928),
-                    initialZoom: 13.0,
-                    onTap: _onMapTap,
-                  ),
-                  children: [
-                    TileLayer(
-                      // 1. PERFORMANCE FIX: Added CancellableNetworkTileProvider
-                      tileProvider: CancellableNetworkTileProvider(),
-                      
-                      // 2. DARK MODE URL SWITCH
-                      urlTemplate: _isDarkMode
-                          ? 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}'
-                          : 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png',
-                      subdomains: const ['a', 'b', 'c', 'd'],
-                      userAgentPackageName: 'com.timeinloo.gpx_editor',
+                // WRAP FLUTTERMAP IN MOUSEREGION FOR HOVER
+                MouseRegion(
+                  onHover: _handleHover,
+                  cursor: _currentMode == EditorMode.cut 
+                      ? SystemMouseCursors.precise 
+                      : SystemMouseCursors.basic,
+                  child: FlutterMap(
+                    mapController: _mapController,
+                    options: MapOptions(
+                      initialCenter: const LatLng(51.509364, -0.128928),
+                      initialZoom: 13.0,
+                      onTap: _onMapTap,
                     ),
-                    PolylineLayer(polylines: borderPolylines),
-                    PolylineLayer(polylines: trackPolylines),
-                    MarkerLayer(markers: markers),
-                  ],
+                    children: [
+                      TileLayer(
+                        tileProvider: CancellableNetworkTileProvider(),
+                        
+                        // 3-Stage Map Toggle: Light -> Dark Grey -> Satellite
+                        urlTemplate: _mapStyleIndex == 0
+                            ? 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png' // Light
+                            : _mapStyleIndex == 1
+                                ? 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}' // Dark Grey
+                                : 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', // Satellite
+                        
+                        subdomains: const ['a', 'b', 'c', 'd'],
+                        userAgentPackageName: 'com.timeinloo.gpx_editor',
+                      ),
+                      PolylineLayer(polylines: borderPolylines),
+                      PolylineLayer(polylines: trackPolylines),
+                      
+                      MarkerLayer(markers: [
+                        ...markers,
+                        // --- GHOST SCISSORS (CUT PREVIEW) ---
+                        if (_currentMode == EditorMode.cut && _previewCutPoint != null)
+                          Marker(
+                            point: _previewCutPoint!,
+                            width: 30,
+                            height: 30,
+                            child: Transform.translate(
+                              offset: const Offset(0, -15),
+                              child: const Icon(
+                                Icons.content_cut, 
+                                color: Colors.white, 
+                                size: 24,
+                                shadows: [
+                                  Shadow(blurRadius: 5, color: Colors.black, offset: Offset(0,0))
+                                ],
+                              ),
+                            ),
+                          ),
+                      ]),
+                    ],
+                  ),
                 ),
                 
-                // --- TOOL PALETTE (Wrapped in Theme for Dark Mode) ---
+                // --- TOOL PALETTE ---
                 Positioned(
                   top: 20, left: 20,
                   child: Theme(
-                    data: _isDarkMode ? ThemeData.dark() : ThemeData.light(),
+                    data: _isDarkTheme ? ThemeData.dark() : ThemeData.light(),
                     child: ToolPalette(
                       onCut: _handleCut,
                       onMove: _handleMove,
@@ -900,19 +1002,18 @@ class _EditorScreenState extends State<EditorScreen> {
                    Positioned(
                      bottom: 20, right: 100, 
                      child: Theme(
-                       data: _isDarkMode ? ThemeData.dark() : ThemeData.light(),
+                       data: _isDarkTheme ? ThemeData.dark() : ThemeData.light(),
                        child: FloatingActionButton.extended(
                          onPressed: () => setState(() => _currentMode = EditorMode.view),
                          label: const Text("Done"),
                          icon: const Icon(Icons.check),
-                         // We adjust the color slightly for dark mode visibility
-                         backgroundColor: _isDarkMode ? Colors.green[800] : Colors.green,
+                         backgroundColor: _isDarkTheme ? Colors.green[800] : Colors.green,
                          foregroundColor: Colors.white,
                        ),
                      ),
                    ),
 
-                // --- CONTROLS (Zoom, Pan, Dark Mode) ---
+                // --- CONTROLS (Zoom, Pan, Map Style) ---
                 Positioned(
                   bottom: 20,
                   right: 20, 
@@ -922,48 +1023,52 @@ class _EditorScreenState extends State<EditorScreen> {
                       // Zoom & Fit Group
                       Card(
                         elevation: 4,
-                        // Manual Color override to match Theme
-                        color: _isDarkMode ? const Color(0xFF424242) : Colors.white,
+                        color: _isDarkTheme ? const Color(0xFF424242) : Colors.white,
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                         child: Column(
                           children: [
                             IconButton(
                               icon: const Icon(Icons.add), 
                               tooltip: "Zoom In",
-                              color: _isDarkMode ? Colors.white : Colors.black,
+                              color: _isDarkTheme ? Colors.white : Colors.black,
                               onPressed: _zoomIn,
                             ),
                             Container(height: 1, width: 30, color: Colors.grey[300]),
                             IconButton(
                               icon: const Icon(Icons.remove), 
                               tooltip: "Zoom Out",
-                              color: _isDarkMode ? Colors.white : Colors.black,
+                              color: _isDarkTheme ? Colors.white : Colors.black,
                               onPressed: _zoomOut,
                             ),
                             Container(height: 1, width: 30, color: Colors.grey[300]),
                             IconButton(
                               icon: const Icon(Icons.fit_screen), 
                               tooltip: "Fit Content to Screen",
-                              color: _isDarkMode ? Colors.white : Colors.black,
+                              color: _isDarkTheme ? Colors.white : Colors.black,
                               onPressed: _fitToContent,
                             ),
                           ],
                         ),
                       ),
                       const SizedBox(height: 10),
-                      // Dark Mode Toggle
+                      
+                      // Map Style Toggle
                       FloatingActionButton(
                         mini: true,
-                        backgroundColor: _isDarkMode ? const Color(0xFF424242) : Colors.white,
+                        backgroundColor: _isDarkTheme ? const Color(0xFF424242) : Colors.white,
                         onPressed: () {
                           setState(() {
-                            _isDarkMode = !_isDarkMode;
+                            // Cycle: 0 -> 1 -> 2 -> 0
+                            _mapStyleIndex = (_mapStyleIndex + 1) % 3;
                           });
                         },
-                        tooltip: _isDarkMode ? "Switch to Light Mode" : "Switch to Dark Mode",
+                        tooltip: "Switch Map Layer",
                         child: Icon(
-                          _isDarkMode ? Icons.light_mode : Icons.dark_mode,
-                          color: _isDarkMode ? Colors.white : Colors.grey[800],
+                          _mapStyleIndex == 0 ? Icons.wb_sunny_outlined // Sun for Light
+                          : _mapStyleIndex == 1 ? Icons.dark_mode       // Moon for Dark
+                          : Icons.satellite_alt,                        // Satellite Icon
+                          
+                          color: _isDarkTheme ? Colors.white : Colors.grey[800],
                         ),
                       ),
                     ],
@@ -997,25 +1102,22 @@ class _EditorScreenState extends State<EditorScreen> {
             ),
           ),
 
-          // --- PATH LIST (Updated for Dark Mode) ---
+          // --- PATH LIST ---
           SizedBox(
             width: 250, 
             child: Container(
-              // 1. Sidebar Background: Very Dark (Material Dark Surface) or White
-              color: _isDarkMode ? const Color(0xFF121212) : Colors.white, 
+              color: _isDarkTheme ? const Color(0xFF121212) : Colors.white, 
               child: Theme(
-                // 2. FORCE EXPLICIT THEME DATA
-                data: _isDarkMode 
+                // FORCE EXPLICIT THEME DATA
+                data: _isDarkTheme 
                     ? ThemeData.dark().copyWith(
                         scaffoldBackgroundColor: const Color(0xFF121212),
-                        cardColor: const Color(0xFF2C2C2C), // Lighter grey for cards so they stand out
+                        cardColor: const Color(0xFF2C2C2C), 
                         dividerColor: Colors.grey[800],
-                        // Ensure text is pure white
                         textTheme: ThemeData.dark().textTheme.apply(
                           bodyColor: Colors.white,
                           displayColor: Colors.white,
                         ),
-                        // Ensure icons are white
                         iconTheme: const IconThemeData(color: Colors.white),
                         listTileTheme: const ListTileThemeData(
                           textColor: Colors.white,
